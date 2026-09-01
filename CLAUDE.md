@@ -13,9 +13,12 @@ is OOD in HUMANISE), fixed by an explicit action one-hot + a synthesized walk→
 (`cond_mode=full_action`, RESULTS §11). Best interaction model:
 `~/wander_data/step11/checkpoints/action`.
 
-**Next: step 12, collision-guided decoding** — nothing in the system steers; chains collide
-~0-8% vs a 1.09% straight-line control. That is the last SWAPPABLE contribution. No number
-here is comparable to published work yet.
+**Step 12 (collision-guided decoding) is DONE (2026-09-02, RESULTS §13)** — the last SWAPPABLE
+contribution. Inference-time steering (`collision_guided.py`, no training): greedy chains collide
+≥ a straight line (the model doesn't steer), but per-segment best-of-N on `goal_err + 10·collision`
+(`guided_seg`) drops collision below the straight-line oracle on both seeds while improving goal
+error. **Next: step 13 (Qwen JSON → end-to-end ScanNet demo) and/or the paper writeup.** No number
+here is comparable to published work yet (generation FID still unreproduced).
 
 *(This header goes stale faster than anything else in the file. Three stale "next step"
 pointers were found in one day. If it disagrees with `docs/IN_FLIGHT.md`, IN_FLIGHT wins —
@@ -214,12 +217,13 @@ the five-entry bug ledger, and the gotchas that will bite again (VQ-VAE normaliz
 leaked 45.3mm baseline, `QuantizeEMAReset` not surviving `load_state_dict`, the 0.9m collision
 threshold). Do not re-derive or re-litigate any of it here.
 
-Not yet established, and worth stating plainly: **scene conditioning's contribution is
-unmeasured as obstacle avoidance** (chains still collide more than a straight line — step 12's
-job), **the composed-chain interaction yield is ~50% and single-seed** (RESULTS §11), and
+Obstacle avoidance is now DONE at DECODE time (step 12, RESULTS §13): `guided_seg` steering beats
+the straight-line oracle on both seeds. Note the distinction — the trained scene CONDITIONING still
+does not by itself steer (greedy collides ≥ a straight line); the steering is an inference-time
+selector on top. Still not established, and worth stating plainly: **the composed-chain interaction
+yield is ~50% and single-seed** (RESULTS §11), **step 12 is two seeds / one model**, and
 **generation FID is still unreproduced after 5 attempts**, so no number in this repo can be
-compared to published work. (Chaining itself — including interaction in a chain — IS done, §9
-and §11.)
+compared to published work. (Chaining, interaction-in-a-chain, and steering ARE done — §9, §11, §13.)
 
 ---
 
@@ -268,20 +272,26 @@ failure after building everything on top.
    output BEFORE reading any model number off it. If the oracle is not small relative to
    the effect you are measuring, you have no measurement. Highest-frequency failure mode
    in this project, ahead of any algorithmic risk.
-5. **Collision-guided decoding (2e).** May not steer. Not the hill — has fallbacks and
-   demotes to an ablation. Low strategic risk by design.
-6. **Shared GPU.** The 4090 is shared; the 3090 is not. See section 8.
+5. ~~Collision-guided decoding (2e). May not steer.~~ RETIRED 2026-09-02 — it steers (RESULTS
+   §13). Both the guaranteed floor (rejection sampling) and the reactive `guided_seg` selector
+   beat the straight-line oracle; `guided_seg` also improves goal error. Did NOT demote to an
+   ablation; it is a working contribution. The design worry was right that greedy alone does not
+   steer — that is exactly the baseline it beats.
+6. **Shared GPU.** The 4090 is shared; the 3090 is not (but as of 2026-09-02 another user's
+   light job runs on the 3090 too — check `nvidia-smi --query-compute-apps` first). See section 8.
 7. ~~Goal grounding~~ RETIRED 2026-08-12 — probe passed, see 2f. Do not pivot to
    trajectory-first.
 8. ~~VQ-VAE joint finetune balance~~ RETIRED 2026-08-12 — Track 2 passed at 1:1 sampling,
    lr 2e-5, no forgetting.
 
-Meta: chaining, goal-following, AND interaction-in-a-chain are all retired (step 11, RESULTS
-§11 — the interaction one was NOT free, it took an explicit action input + a synthesized
-walk→sit seam). **Obstacle avoidance is now the only thing between here and a demo worth
-showing that also steers.** Everything else is engineering plus discipline about measurement
-(#4) — which, in step 11, is exactly what caught the "sit" that was really a walk (goal error
-is z-blind; use pelvis height).
+Meta: chaining, goal-following, interaction-in-a-chain (step 11, RESULTS §11), AND obstacle
+avoidance (step 12, RESULTS §13) are all retired. **The core research bets are all closed.**
+Obstacle avoidance was the last: `guided_seg` decode-time steering drops collision below the
+straight-line oracle while improving goal error (§13). What remains is integration (step 13,
+Qwen→demo), benchmark comparison (step 14), and the writeup — engineering plus discipline about
+measurement (#4), which in step 11 caught the "sit" that was really a walk (goal error is z-blind;
+use pelvis height) and in step 12 kept goal_err in the steering objective so it can't "avoid" a
+wall by refusing to move.
 
 ---
 
@@ -302,20 +312,25 @@ the first that INTERACTS in a chain.
     seam was OOD (both hidden by goal error, which is z-blind). Fixed with an explicit action
     one-hot + a synthesized walk→sit seam (`--walk-prefix-aug`) + walk-only goal-aug.
 
-**-> YOU ARE HERE. Next: 12.**
+12. ~~**Collision-guided decoding**~~ DONE (RESULTS §13, 2026-09-02). Inference-time steering,
+    no training (`scripts/chaining/collision_guided.py`). `guided_seg` = per-segment best-of-N on
+    `goal_err + 10·collision` (greedy is always candidate 0). Drops collision from greedy's
+    2.06%/3.63% to 0.69%/2.64% — BELOW the straight-line oracle (1.57%/3.93%) on both seeds — while
+    IMPROVING goal error to 0.09–0.11 m. `reject_chain` (whole-chain rejection) is the floor but
+    degrades goal error. Figure: `~/wander_data/step12_fig/cg_compare_scene0001_00.png`.
 
-12. **Collision-guided decoding** (SWAPPABLE, see 2e). The only other thing gating a demo.
-    Measured target: beat the **1.09%** straight-line control — current models sit at
-    2.07-2.61%, i.e. worse than walking directly between waypoints. Rejection sampling over
-    chained rollouts is the guaranteed floor and is worth measuring first.
-13. **Qwen JSON** wired end-to-end -> ScanNet demo mp4 showing scene interaction. No longer
-    blocked: arbitrary goals now work (§10).
+13. ~~**Qwen JSON** wired end-to-end~~ DONE (RESULTS §14, 2026-09-02). `scripts/planner/` — an
+    instruction + the scene image go to a LOCAL VLM (ollama `qwen3.5:27b`), which grounds the goal
+    by picking a numbered furniture ANCHOR (low-furniture connected components, `scene_anchors.py`)
+    and emits a `{action, target}` segment plan; `demo_end2end.py` expands it, runs the step-11
+    action model with `guided_seg` steering on walks, and renders in the room mesh. Verified: qwen
+    grounded "the couch" correctly; sit/stand fired by pelvis height (SAT 0.56 m, STOOD 0.95 m).
+
+**-> YOU ARE HERE. Next: 14 (benchmark + FID), or polish (skinned body mesh, sit-placement).**
+
 14. **Benchmark comparison** (PSMo / AffordMotion) + generation FID. **Check how they define
     non-collision before quoting anything** — given RESULTS §8 theirs cannot be the naive
     definition, and the definition decides comparability.
-
-Time-box 11 and 12. A watchable demo that meets criteria 4 and 5 is worth more right now than
-another well-instrumented negative result.
 
 ## 7. Done criteria
 1. ~~Baseline matches T2M-GPT paper~~ DONE for reconstruction; harness trusted.

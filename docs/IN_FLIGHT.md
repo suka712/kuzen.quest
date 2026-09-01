@@ -3,11 +3,57 @@
 Volatile state that is NOT captured by RESULTS.md: what is running, where things live on the
 boxes, and the next concrete action. **Update or delete this file when its work lands.**
 
-Last updated: 2026-08-18. Steps 1-11 done. **Step 11 (interaction in a chain) is DONE —
-done-criteria 4 and 5 MET.** Watchable walk→sit→stand→walk clips at
-`~/wander_data/step11_demo_multiseg/` (best: `demo_00` scene0151/couch, `demo_05`
-scene0694/coffee-table, both 0% collision). Best interaction model:
-`~/wander_data/step11/checkpoints/action`.
+Last updated: 2026-09-02. Steps 1-12 done. Best interaction model
+`~/wander_data/step11/checkpoints/action` (`cond_mode=full_action`); best navigation model
+`~/wander_data/step10/checkpoints/goalaug` (`cond_mode=full`); finetuned VQ-VAE
+`~/wander_data/motion_data/track2_checkpoints/net_iter020000.pth`.
+
+**STEP 12 DONE (2026-09-02) — collision-guided decoding works. RESULTS §13.**
+`scripts/chaining/collision_guided.py` adds inference-time scene steering (no training). On 20×6
+chained rollouts, two seeds: greedy collides 2.06%/3.63% (≥ a straight line — the model doesn't
+steer); **guided_seg (per-segment best-of-N on `goal_err + 10·collision`) cuts it to 0.69%/2.64%,
+BELOW the straight-line oracle (1.57%/3.93%), while IMPROVING goal error to 0.09–0.11 m.** Rejection
+sampling (`reject_chain`) is the floor (0.85%/2.19%) but degrades goal error. Figure:
+`~/wander_data/step12_fig/cg_compare_scene0001_00.png` (greedy walks through an obstacle 16.3% →
+guided 0.0%). This is the last SWAPPABLE contribution; navigation+chaining+grounding+steering is now
+a complete story. **Next: step 13 (Qwen JSON end-to-end demo) and/or the writeup.**
+
+**STEP 13 DONE (2026-09-02) — end-to-end VLM pipeline works. RESULTS §14.** `scripts/planner/`:
+`scene_anchors.py` (low-furniture connected components -> numbered anchors on the BEV), `qwen_plan.py`
+(ollama `qwen3.5:27b` vision -> JSON `{action,target}` plan; VLM grounds WHICH anchor, geometry gives
+the xy), `demo_end2end.py` (expand -> guided_seg-steered rollout with the step-11 action model ->
+full-mesh render). Verified on scene0151 "sit and relax on the couch…": qwen grounded the couch to
+anchor #1, chain SAT (pelvis 0.56 m) and STOOD (0.95 m). Demo + plan image shipped to
+`mcx:/Users/khiem/Documents/wander-output/step13/`. VLM plan ~80 s (27B). The sit still lands at the
+seat EDGE (the §11 narrowness carries through the VLM plan unchanged). **Next: step 14 (benchmark +
+FID) or demo polish (skinned body mesh, sit-placement).**
+
+**FULL-MESH 3D DEMOS (2026-09-02).** `scripts/chaining/render_mesh_demo.py` renders generated motion
+as a balls-and-sticks skeleton (no SMPL on disk) INSIDE the real textured `*_vh_clean_2.ply` room
+mesh (ceiling-clipped), with a tracking follow-camera. Two modes: `--mode interaction` (walk→sit→
+stand→walk, step-11 action model, retries seeds for SAT&STOOD) and `--mode navigation` (guided_seg
+steering, goalaug). Validated the render path with a GT-joints oracle first (skeleton sits correctly
+on the couch). Outputs in `~/wander_data/step12_mesh_demo/`; the couch-sit + office-navigation clips
++ the cg_compare figure were shipped to the Mac at `mcx:/Users/khiem/Documents/wander-output/step12/`
+(scp via sshpass, key auth not set up). NOTE the sit still lands at the seat EDGE/corner, not squarely
+(the documented sit-placement narrowness), so interaction clips are watchable but not crisp; couches
+read better than armchairs.
+
+**Two big investigations closed since (both documented, do not redo):**
+- **Geometry-grounded tokenizer (SceMoS port): explored → MARGINAL, not worth shipping. RESULTS §12.**
+  Both the frozen-decoder and the full unfreeze+shift-consistency cascade were built & measured; the
+  contact-height gain is a wash and it costs broad motion quality. Keep the scene-blind tokenizer.
+- **Sit orientation is a DATA limitation, not tunable → do it in the PLANNER.** HUMANISE bakes in
+  approach≈sit-facing (median 5°), so the motion model can't learn facing; but a geometry perceiver
+  (`probe_furniture_orientation.py::perceive_facing`, "away from the backrest") gets ~30–36° median on
+  clear-fronted furniture (a VLM, ollama qwen3.5:27b vision, is comparable and NOT better). See the
+  "Open limitation — sit orientation" section below for the full numbers.
+
+**→ NEXT ACTION (in progress): orientation-driven "true sit" demo.** Wire the geometry perceiver into
+the demo so the APPROACH is planned from perceived furniture facing (not GT), curated to clear-fronted
+furniture (sofa/chair/bed). Reuses `scripts/chaining/{demo_interaction,rollout}.py` + the step-11 model.
+This is a legitimate planner-side fix (no GT peek, no motion-model tuning). **[DONE — narrow/low-yield,
+see the sit-orientation section. Step 12 is now also DONE, see the banner above.]**
 
 ---
 
@@ -38,12 +84,15 @@ full_action --iters 20000 --lr 1e-4 --goal-aug 0.5 --walk-prefix-aug 0.5 --token
   undershoots and leaves the sit goal too long → the model walks instead of sitting).
   `--seed-action lie` for a lie demo (untried — worth a run).
 
-## Next: step 12 (collision-guided decoding) or demo polish
+## Next: step 13 (end-to-end demo) or the writeup
 
-Done-criteria 4/5 are met, so the demo gate is cleared. Remaining build-order items:
-- **Step 12 — collision-guided decoding** (the last SWAPPABLE contribution). Target: beat the
-  **1.09%** straight-line control; the `full_action` chains sit at ~0–8% collision (some scenes
-  worse, e.g. 24% once). Rejection sampling over chained rollouts is the guaranteed floor.
+Done-criteria 4/5 are met AND step 12 is done, so both demo gates are cleared. Remaining
+build-order items:
+- **Step 12 — collision-guided decoding — DONE (2026-09-02, RESULTS §13).** `collision_guided.py`;
+  guided_seg (w=10, n_cand=8) beats the straight-line oracle on both seeds while improving goal
+  error. Reproduce: `collision_guided.py --ckpt ~/wander_data/step10/checkpoints/goalaug
+  --vqvae-ckpt <ft-vqvae> --out <dir> --n-rollouts 20 --n-cand 8 --coll-weight 10 --seed {0,1}`.
+  Figure: `render_cg_compare.py`.
 - **Demo polish** (optional): close the composed SAT gap (50% → higher) with end-of-walk
   prefixes in `--walk-prefix-aug` (currently mid-stride only) or a higher aug probability; a
   `lie` demo; nicer camera. See RESULTS §11 "honest gap".
@@ -62,10 +111,77 @@ arXiv 2602.20476, TRUMANS): put scene geometry in the **TOKENIZER**, not just th
   transformer-side occupancy FOOTPRINT (height/orientation blind). That is why our interactions
   can't be contact-correct and the occupancy signal is weakly used.
 - Sketch of the port: retrain the VQ-VAE with a local heightmap input to the decoder + a contact
-  loss. **Open blocker to check first: does HUMANISE give us per-frame surface geometry to build
-  the heightmaps?** (We have the scene mesh + the world-frame track, so a local heightmap under
-  the root is computable — verify resolution/extent are enough. `probe_furniture_orientation.py`
-  already pulls local scene geometry per clip; reuse that plumbing.)
+  loss.
+
+**BLOCKER RESOLVED 2026-08-28 — HUMANISE DOES give usable per-frame surface geometry.**
+`scripts/scene_tokenizer/probe_heightmap.py` (no model/GPU/263 path — just `compute_track2` for the
+world track + `bev_render._load_scene_mesh`, sampled with a cKDTree) builds the SceMoS ±0.6 m /
+32×32 body-frame heightmap under the root. n=30/action, the ORACLE (support-surface height under
+the body vs pelvis height, both above floor):
+
+| action | pelvis_h | support_h | clearance (pelvis−support) | fill% |
+|---|---|---|---|---|
+| sit | 0.65 | 0.70 (raised seat) | −0.05 | 94 |
+| lie | 0.28 | 0.29 (raised bed/mat) | −0.01 | 98 |
+| stand up | 0.79 | 0.69 (at furniture) | 0.10 | 90 |
+| walk | 1.00 | 0.31 (floor/passing furniture) | **0.69** | 90 |
+
+The discriminator is **clearance**: an interacting body rests ON the surface (~0), a walking body
+is high ABOVE it (0.69). Montages (`~/wander_data/scene_tokenizer_probe/heightmap_*.png`) show
+coherent seats/beds, not noise. Fill 90–98% at 32×32 → the mesh is dense enough; only 2–10% of
+cells need nearest-neighbor densifying. **The geometry-grounded tokenizer is viable; proceed to
+the build.** One sampling caveat for the real extractor: naive max-Z-in-column catches walls /
+overhead beside the target (one sit clip read 2.5 m) — either keep it (legit "obstacle here"
+signal) or clip to a support-surface definition; decide in the extractor, not now.
+
+### OUTCOME (2026-08-28 frozen; 2026-09-01 unfrozen) — BUILT & FULLY MEASURED. Mechanism works; BOTH approaches are marginal on our data. Full write-up: RESULTS §12. Recommendation: keep the scene-blind tokenizer; do not build further on this without new evidence.
+
+**The full unfreeze retrain (user-authorized) is DONE and also marginal.** Unfroze encoder+quantizer
+with a shift-consistency loss to make tokens height-agnostic (invariance plateaued 0.72 at
+consist-weight 0.25), re-extracted all tokens (`~/wander_data/scene_tokenizer/tokens`, crop = 4×old
+token length — NOT crop_to_multiple), retrained the transformer (`checkpoints/action_scene`, 97.2%
+acc). Generated sits now track seat height (corr 0.1→0.6 vs the old fixed-nominal pipeline) BUT add
+a ~7 cm overshoot (GT pelvis sits 0.156 m above the seat; heightmap decode lands at 0.229) so
+absolute contact is a wash, and it cost broad MPJPE regression (sit 48→74). Tokenizer:
+`checkpoints/scene_vqvae_unfrozen/net_iter007500.pth`. Gate: `gate_height_agnostic.py`. See RESULTS §12.
+
+Original frozen finding (kept for the record):
+
+The whole port was built and characterized (all code under `src/scene_*.py`, `src/contact_loss.py`,
+`scripts/scene_tokenizer/*`). What was learned, in order:
+1. **Extraction (done, validated).** `extract_heightmaps.py` → `~/wander_data/motion_data/HUMANISE_heightmap_cache`
+   (19,648 clips, (T,32,32) f16, offset-0 aligned to the 263 cache). **Vertical-reference bug caught by an
+   oracle:** the heightmap must be CLIP-FLOOR referenced (`scene_heightmap.to_clip_frame`), not scene-floor —
+   a lie-on-bed body else reads 0.8 m "under" the bed (GT penetration 400–770 mm → ~0 after the fix).
+2. **Decoder + freeze insight (done).** `SceneVQVAE` fuses a per-frame heightmap into the (pretrained) decoder,
+   identity-init so recon == base at iter 0. **Freezing the encoder+quantizer keeps tokens BIT-IDENTICAL**
+   (verified) → step10/tokens + the step-11 transformer are reused, NO re-tokenize/retrain. This collapsed
+   the planned 5-stage cascade — and is also why the cheap version is limited (below).
+3. **Redundancy trap #1 (reconstruction).** With plain recon+penetration the decoder IGNORES the heightmap
+   (`follow_ratio` 0.00 at 2.5k) — the token already determines contact height. Fixed with **vertical-shift
+   augmentation** (`train_scene_vqvae --height-aug`: encode the original clip, shift the heightmap by Δ, require
+   the body to shift by Δ). follow → **~1.0**. Model: `~/wander_data/scene_tokenizer/checkpoints/scene_vqvae/net_iter020000.pth`.
+4. **Redundancy trap #2 (generation) — THE BLOCKER, not solved.** `follow=1.0` is the RECONSTRUCTION regime
+   (token consistent with the hm). At GENERATION the transformer emits a *generic* sit token that already
+   encodes a nominal contact height (~0.6 m), and with the encoder FROZEN that token dominates the heightmap.
+   Measured (`eval_contact_demo.py`, iterate-converged): generated seated pelvis is ~constant **~0.6 m**
+   regardless of the real seat (0.15–0.4 m overshoot on low seats), corr(seat) only +0.2. It tracks well ONLY
+   on tall seats (>0.9 m) where the scene-blind undershoot is even worse. So aggregate contact does NOT
+   cleanly improve.
+
+**Root cause & the real fix.** Frozen tokens carry the contact height that competes with the heightmap. The
+proper SceMoS result needs the ENCODER trained heightmap-aware so tokens DON'T encode absolute contact height
+(forcing the decoder to use the hm) → that means UNFREEZING encoder+quantizer, re-extracting tokens, and
+retraining the transformer (the full cascade, ~hours). **Decision deferred to the user:** the scene-blind
+tokenizer already meets done-criteria 4/5 (watchable sits), so contact-refinement is a nice-to-have whose
+payoff — even with the full retrain — is now uncertain. Do not launch the unfreeze retrain without deciding
+it's worth it. Two cheaper things to try FIRST if pursuing: (a) a **support-surface** heightmap (max-Z catches
+backrests, inflating the seat ~0.15 m — a lower-percentile/under-body definition may cut the overshoot);
+(b) generation-regime augmentation (token-dropout of the height channels so the decoder must rely on the hm).
+- Inference circularity WAS solved: `scene_decode.decode_with_heightmap` (scene-blind first pass → SE(2) place
+  → sample heightmaps along the track → re-decode; converges in 1 iter). Wired into `rollout(..., scene_ctx=)`.
+- Orientation SELECTION stays separate and open even at SOTA — the heightmap fixes CONTACT height, not facing.
+  `probe_furniture_orientation.py` already pulls local scene geometry per clip; same plumbing.
 - Orientation SELECTION stays separate and open even at SOTA — SceMoS leans on the planned
   approach for it, same as us. So the placement-side "perceive orientation → set the approach/
   placement yaw" remains the near-term answer; the heightmap tokenizer fixes CONTACT, not facing.
@@ -79,6 +195,39 @@ occupancy is a footprint. **Do NOT "fix" the demo by approaching from the GT sea
 that is a hack (peeks at GT, doesn't touch the model, doesn't generalize), rejected on
 2026-08-20.** Proper fix = an orientation-aware scene rep the model consumes (RGB render /
 oriented-object map), or making it depend on an explicit orientation input. RESULTS §11.
+
+**Orientation is a DATA limitation, not a tuning one (settled 2026-09-01).** HUMANISE bakes in
+approach≈sit-facing (people walk in facing where they'll sit: |approach − GT sit facing| median
+**5°**), so the motion model cannot learn facing as an independent signal — the heading input was
+learned-to-be-ignored for exactly this reason (RESULTS §11). Therefore orientation must come from
+the PLANNER (perceive the furniture facing → set the approach; the sit then follows it), NOT the
+motion model. **Feasibility tested — perception works ~as well as it can, imperfectly:**
+- Geometry heuristic (`probe_furniture_orientation.py`, "face away from the backrest mass"): median
+  36°, 58% <45°, but **41% of furniture is ambiguous** (no backrest → returns None). Free, instant,
+  deterministic, and it KNOWS when it's ambiguous.
+- VLM (ollama `qwen3.5:27b`, vision, `think:False`; oblique render + projected world-compass,
+  `tmp/vlm_orient_probe.py`): median **29°**, 58% <45° — **comparable to geometry, does NOT beat it**,
+  slow (~13 s/query), and it always guesses (occasional 180° front/back flips, e.g. a toilet 150° off;
+  scan quality hurts). Clear-fronted furniture (sofa/chair/bed/desk-chair) lands <30°; tables are
+  unresolvable (no defined front).
+- **Conclusion: "true sit" IS reachable via the planner on CURATED clear-fronted furniture** (not a
+  hack, not motion-tuning): use the geometry heuristic (preferred — free, abstains on ambiguous) or
+  the VLM to set the approach direction, restrict demo furniture to sofas/chairs/beds. ~30° median /
+  ~40% notable-miss rate means it's demo-grade with curation, not production-robust. Top-down renders
+  are illegible for facing; oblique perspective is needed (viewpoint selection required).
+
+**BUILT & TESTED the orientation-driven demo (`scripts/chaining/demo_orient_sit.py`, 2026-09-01).**
+The mechanic is PROVEN: **the sit obeys its planned facing to median 4°** (the model sits facing its
+approach direction, so approaching IN direction F from the back side makes the sit face F — a new
+`rollout(seg_headings=...)` hook forces a per-segment heading; approach-from-front + a forced sit
+turn does NOT fire the sit). One clean end-to-end "true sit": scene0380 chair, perceived 5° from GT →
+sat 2° from GT, fired (SAT&STOOD), no GT peek. **But it's narrow and low-yield, three compounding
+caps:** (1) perception median 37° (great on chairs, bad on tables/couches); (2) sit FIRING only ~25%
+(the walk→sit seam, RESULTS §11); (3) needs a walkable BACK side (freestanding furniture) so the sit
+can approach facing F without a turn — ~⅔ of seeds skipped (ambiguous or wall-backed). Net: a correct
+correct-facing fired sit lands on maybe ~1 in 8 seeds. **Conclusion: "true sit" is achievable but only
+in a curated freestanding/clear-furniture slice at low yield — the user's "we can't truly have sit"
+is largely right for the general case.** Harvestable for a demo clip or two, not robust.
 
 ## Heading (moonwalk) — FIXED at inference 2026-08-19 (RESULTS §11)
 
@@ -127,19 +276,15 @@ clips. Validated at 2k iters: walking-prefix sit 0%→85%.
   remains best for pure navigation but sits only 42%.
   `step10/checkpoints/goalaug` remains best for pure navigation but sits only 42%.
 
-## After that — collision-guided decoding
+## Collision-guided decoding — DONE (2026-09-02, RESULTS §13)
 
-The only other thing gating a demo. Target already measured: beat the **1.09%** straight-line
-control (current models sit at 2.07-2.61%, i.e. worse than walking directly).
-
-Approach per CLAUDE.md 2e: at each AR step take top-k tokens, decode each candidate's root
-movement, check against the 0.9 m tall-obstacle map, re-rank to prefer non-colliding.
-**Rejection sampling over whole chained rollouts is the guaranteed floor** — generate N
-chains, keep the lowest-collision one — worth measuring first as a baseline.
-
-Build on `~/wander_data/step10/checkpoints/goalaug`. Measure with
-`scripts/chaining/demo_rollout.py --n-rollouts 30 --min-step 0.6 --max-step 1.2`, which
-prints the straight-line control alongside.
+Implemented in `scripts/chaining/collision_guided.py` as SEGMENT-level rejection sampling
+(guided_seg) plus the whole-chain floor (reject_chain), both vs greedy and the straight-line
+oracle on identical scenes. guided_seg = per-segment best-of-N on `goal_err + w·collision`
+(candidate 0 = greedy, so never worse than greedy). Built on `step10/checkpoints/goalaug`.
+Result: below the straight-line oracle on both seeds while improving goal-following; see the
+banner at the top and RESULTS §13 for the full table + caveats. `demo_rollout.py` still prints
+the straight-line control for the greedy baseline number.
 
 ## Ready to use
 
@@ -161,6 +306,11 @@ prints the straight-line control alongside.
   Truncation augmentation is the correct form (RESULTS §10).
 
 ## Where things live on the 3090
+
+**2026-09-01: the data was MOVED to `~/Khiem/wander_data` (shell history: `mv wander_data Khiem`).**
+Restored transparent access with a symlink `~/wander_data -> ~/Khiem/wander_data`, so every hardcoded
+`~/wander_data/...` path (code, `.wander_env`, docs) still works. If a fresh box is missing `~/wander_data`,
+recreate that symlink first. Nothing was lost.
 
 All paths under `~/wander_data/` unless noted. None of it is in git.
 

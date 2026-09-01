@@ -599,13 +599,152 @@ and the trade bought the walk→sit seam existing at all.
 
 ---
 
+## 12 · Geometry-grounded tokenizer (SceMoS port) — BUILT & MEASURED; marginal on our data
+
+The SceMoS-style upgrade (§8/IN_FLIGHT): put scene geometry in the TOKENIZER's decoder (local
+heightmap → decoder + contact loss) so decoded interaction is contact-correct, not just
+scene-grounded on the transformer side. Fully built (`src/scene_*.py`, `src/contact_loss.py`,
+`scripts/scene_tokenizer/*`) and measured end-to-end. **Verdict: the mechanism works, but on our
+data it gives only a marginal contact improvement at a real motion-quality cost — it does NOT
+reproduce SceMoS's clean contact-correctness (Contact 0.98 on TRUMANS).** A negative-but-useful
+result: do not build further on it without new evidence (the DINOv2 precedent, §6).
+
+**Input is real (blocker passed).** ±0.6 m / 32×32 body-frame heightmaps from the ScanNet mesh +
+world track capture seats/beds/floor (clearance separates on-surface from above-surface). Two
+convention bugs caught by oracles: 263↔track frame alignment (offset 0), and the **vertical
+reference** — the heightmap must be CLIP-FLOOR referenced (else a lie-on-bed body reads 0.8 m
+"under" the bed, GT penetration 400–770 mm → ~0 after the fix). Contact-loss axis mapping
+GT-validated (~0 GT penetration).
+
+**Two approaches, both measured:**
+1. **Frozen encoder (cheap).** Heightmap-conditioned decoder only; tokens/transformer reused
+   unchanged. A **vertical-shift augmentation** (encode original, shift the heightmap by Δ, require
+   the body to shift by Δ — the analog of goal-aug §10) breaks the redundancy trap: reconstruction
+   follow-ratio 0.00 → ~1.0. **But it does NOT transfer to generation:** follow=1.0 is the
+   reconstruction regime (token consistent with the hm); a *generated* generic sit token carries a
+   baked-in nominal height that the frozen decoder respects, so generated seated pelvis is ~const
+   0.6 m regardless of the real seat (measured, `eval_contact_demo`).
+2. **Unfrozen + shift-consistency (the "proper" fix, user-authorized).** Unfreeze encoder+quantizer
+   and add a consistency loss `‖enc(motion) − enc(motion+Δ)‖` to make tokens HEIGHT-AGNOSTIC, so
+   the heightmap becomes the contact-height source. Re-extract all tokens + retrain the transformer
+   (full cascade). Token shift-invariance climbed 0.57→0.72 (plateaued at consist-weight 0.25;
+   would need a higher weight, hence worse recons, to reach ~1.0). Transformer retrained to 97.2%
+   token acc on the new codebook.
+
+**Generation result (new transformer + new tokenizer, 39 fired sits).** GT reference: a correctly
+seated pelvis sits **0.156 m ± 0.076** above the seat surface (hip joint above the cushion), so
+|pelvis−seat|≈0.156 is *correct contact*, not overshoot.
+
+| decode | corr(seat) | \|pelvis−seat\| | vs correct (0.156) |
+|---|---|---|---|
+| flat heightmap (token only) | +0.41 | 0.186 | ~correct |
+| **real heightmap** | **+0.59** | 0.229 | +0.07 overshoot |
+| (old scene-blind pipeline, §11) | ~+0.1 | — | fixed nominal, no tracking |
+
+So the heightmap **does** make sits track seat height better (corr 0.1→0.6 vs the old fixed-nominal
+pipeline, 0.4→0.6 vs the new token-only baseline) — but it adds a ~7 cm overshoot, so **absolute
+contact accuracy is a wash**, and the tokens never went fully height-agnostic (0.72), so the
+token-only baseline already tracks most of it.
+
+**Cost.** Reconstruction MPJPE regressed across the board (sit 48→74, stand-up 56→74, h3d 55→63):
+the invariance constraint degrades ALL generated motion quality, not just contact. The trade —
+marginal contact-tracking gain for a broad motion-quality hit — is not worth shipping.
+
+**Why it underdelivers here vs SceMoS.** SceMoS trains its tokenizer from scratch on a large clean
+mocap set (TRUMANS); we retrofit a small finetuned tokenizer, forcing an invariance-vs-fidelity
+trade our data can't absorb. Real furniture seats also cluster near the nominal the scene-blind
+tokenizer already produces, so the headroom is small. **Recommendation: keep the scene-blind
+tokenizer (meets done-criteria 4/5); the bigger interaction gap is sit ORIENTATION (§11), not
+contact height. Models/tokens preserved under `~/wander_data/scene_tokenizer/`.**
+
+## 13 · Collision-guided decoding — DONE, works. The model now steers around obstacles
+
+The gap this closes (§8, §9): the model FOLLOWS goals but does not STEER. Greedy chained rollouts
+collide with the 0.9 m tall-obstacle map ~2–3.6% of the path — as much as or MORE than a straight
+line between the same waypoints. Nothing avoids anything. Step 12 adds inference-time scene
+steering with NO extra training (`scripts/chaining/collision_guided.py`).
+
+**Mechanism.** `trans.sample(if_categorial=False)` is greedy argmax — deterministic, so rejection
+sampling over it is a no-op. Switching to `Categorical(probs)` draws (`if_categorial=True`) gives
+PATH diversity to select over. Two selectors, both compared on the SAME scenes/waypoints/seed with
+the straight-line polyline as the oracle control (risk #4):
+- **reject_chain** (the guaranteed floor, CLAUDE.md 2e): N whole stochastic chains, keep the
+  lowest total collision. Global, not reactive; costs N× generation.
+- **guided_seg** (the actual guided decoder): at EACH segment, sample N candidates (candidate 0 =
+  greedy argmax, so it is never worse than greedy on its own score), decode + SE(2)-place each, keep
+  `argmin(goal_err + w·collision)`. Locally reactive (re-plans every ~1 m hop), cheap (N/segment,
+  not Nᴺ), and goal_err stays IN the objective so it cannot "avoid" a wall by refusing to move.
+
+**Result — 20 chained rollouts × 6 segments, `step10/checkpoints/goalaug`, n_cand=8, two seeds:**
+
+| mode | seed 0 collision | seed 0 goal | seed 1 collision | seed 1 goal |
+|---|---|---|---|---|
+| oracle straight-line | 1.57% | — | 3.93% | — |
+| greedy (baseline) | 2.06% | 0.186 m | 3.63% | 0.161 m |
+| reject_chain (N=8) | 0.85% | 0.204 m | 2.19% | 0.227 m |
+| **guided_seg (w=10)** | **0.69%** | **0.093 m** | **2.64%** | **0.110 m** |
+
+- **Both selectors cut collision below greedy on both seeds.** guided_seg at w=10 also beats the
+  straight-line oracle on both seeds (0.69<1.57, 2.64<3.93) — i.e. the model now routes AROUND
+  obstacles a direct path would clip, the target from CLAUDE.md §12.
+- **guided_seg keeps the task; reject_chain sacrifices it.** guided_seg's goal error (0.09–0.11 m)
+  is *better* than greedy (best-of-N over the combined objective, with greedy always a candidate);
+  reject_chain's rises (0.20–0.23 m) because whole-chain selection favors wandering low-collision
+  routes. Compute-matched (both 8× greedy), guided_seg is the better use of the budget.
+- **`coll_weight` sweep {2,5,10,20}, both seeds:** collision falls as w rises while goal error stays
+  flat (~0.09–0.12 m) — there is no goal-error cost to steering harder on these scenes. Monotone on
+  seed 0 (1.14→0.67%); best at w=10 on seed 1 (2.64%). w=10 chosen as the default.
+- **Money shot:** `~/wander_data/step12_fig/cg_compare_scene0001_00.png` — greedy walks *through* a
+  tall obstacle (16.3%, worse than the 7.8% straight line); guided steers around it to the same
+  waypoints (0.0%).
+
+**Honest caveats.** (1) Two seeds, one model, one dataset — the effect is large and reseeds, but the
+exact percentages are not published-comparable (generation FID still unreproduced, §CLAUDE.md 3).
+(2) The straight-line control's value swings with the waypoint draw (1.57% vs 3.93%), so the robust
+claim is the *relative* reduction vs greedy, not an absolute %. (3) This steers the ROOT PATH against
+an occupancy footprint; it is orthogonal to the sit-orientation and contact-height gaps (§11, §12),
+which it does not touch. (4) An upstream `t2m_trans.sample` bug (unbound `xs` when a stochastic draw
+emits EOS at position 0) is worked around in `safe_sample`, not fixed in the shared base.
+
+## 14 · End-to-end VLM demo — DONE. Instruction -> local plan -> steered interacting motion in a mesh
+
+The full inference pipeline (CLAUDE.md 2c), wired and working (`scripts/planner/`):
+`instruction + scene image -> qwen3.5:27b plan -> expand -> guided rollout -> full-mesh video`.
+
+**Grounding — the design that made it work (`scene_anchors.py`).** VLMs regress raw coordinates
+poorly, so we do NOT ask for coordinates. Low furniture = cells occupied in the 0.12 m map but FREE
+in the 0.9 m map (RESULTS §8) — i.e. sit-able surfaces (sofas/beds/low tables/chair seats), with
+walls and open floor removed. Connected components of that mask are numbered ANCHORS, overlaid on the
+top-down BEV. The VLM (`qwen_plan.py`, ollama `qwen3.5:27b` vision, `format:"json"`, `think:False`)
+picks WHICH numbered anchor each segment targets and WHAT action; geometry converts anchor→world xy.
+So the MLLM does the grounding (which object = where) and the motion model still never guesses a
+location. Output schema: `{"segments":[{"action∈{walk,sit,stand up,lie}, "target": anchor-id|"away",
+"why"}]}`.
+
+**Result (scene0151, "I'm tired… go sit and relax on the couch, then get up and head out").**
+qwen grounded "the couch" to anchor #1 (correct, both from the legend size and the image) and emitted
+`walk #1 → sit #1 → stand up #1 → walk away`. `expand_plan` split it into 9 rollout segments (walk-ups
+auto-split into ≤1.1 m hops, stop 0.35 m short of the seat so the sit goal is in-distribution). The
+step-11 action model generated it with `guided_seg` steering on the walk segments (§13) and greedy
+decoding on the interaction segments. **Verified by pelvis height (risk #4, goal error is z-blind):
+sit → 0.56 m (SAT), stand up → 0.95 m (STOOD).** Path 7.2 m, 3.0% collision. Rendered to
+`end2end_scene0151_00_0.mp4` in the room mesh; plan image `plan_scene0151_00.png`.
+
+**Caveats (honest).** (1) The VLM is slow (~80 s/plan on the 27B) and single instruction / single
+seed here. (2) The sit still lands at the seat EDGE/corner (the §11 sit-placement/orientation
+narrowness carries straight through — the VLM plans correctly, the motion model interacts imperfectly).
+(3) Grounding is validated on ONE clear case; ambiguous rooms / abstract sub-goals ("get a coffee")
+are untested at scale. (4) `qwen3.5:27b` is what is installed; CLAUDE.md specced Qwen3-VL 8B — swap is
+one env var (`WANDER_PLANNER_MODEL`). But the pipeline is REAL and end-to-end: language in, interacting
+motion in a real room out, no hand-authored plan.
+
 ## Conditioning inputs — evidence status
 
 | input | status |
 |---|---|
 | relative-frame goal | validated (§4, §5) |
 | seam pose | validated (§7) |
-| occupancy scene | representation validated (§6); on chained rollouts it beats its ablation on collision/goal/seam (§9), but **single seed per arm** — suggestive, not established. It does NOT produce obstacle avoidance: both models collide more than a straight line. |
+| occupancy scene | representation validated (§6); on chained rollouts it beats its ablation on collision/goal/seam (§9), but **single seed per arm** — suggestive, not established. The trained conditioning does NOT by itself produce obstacle avoidance (greedy collides ≥ a straight line); decode-time steering (§13) is what closes that, and it is what the demo uses. |
 | action one-hot | validated on the final 20k model (§11): the explicit action signal that makes the model sit/stand rather than navigate to the xy. With `--walk-prefix-aug` it lifts walking-prefix sit 0%→85% and standstill sit 42%→83%. Single training run. |
 
 ## Bug ledger — five silent convention bugs, same shape each time
