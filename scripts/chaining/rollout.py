@@ -32,7 +32,7 @@ import numpy as np
 import torch
 
 REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
-for p in ["src", "scripts/track1", "scripts/scene_probe"]:
+for p in ["src", "scripts/track1", "scripts/scene_probe", "scripts/scene_tokenizer"]:
     sys.path.insert(0, os.path.join(REPO_ROOT, p))
 
 import motion_features as mf  # noqa: E402
@@ -100,7 +100,8 @@ def build_cond(cond_mode, goal_world, start_pose, prefix_pose, occ, extent, cmea
 
 def rollout(trans, net, clip_model, clip_mod, mean, std, ns, texts, goals,
             start_pose, prefix_pose, occ=None, extent=None, max_seg=None, actions=None,
-            reorient=False, head_targets=None):
+            reorient=False, head_targets=None, scene_ctx=None, decode_iters=2,
+            seg_headings=None):
     """Chain len(goals) segments. Returns list of per-segment dicts.
 
     actions: per-segment action name (walk/sit/stand up/lie), required when the model's
@@ -131,6 +132,12 @@ def rollout(trans, net, clip_model, clip_mod, mean, std, ns, texts, goals,
                 if np.linalg.norm(dvec) >= HEAD_MIN_DISP:
                     ry = float(np.arctan2(dvec[1], dvec[0]))
                     pose = pose.copy(); pose[2], pose[3] = np.sin(ry), np.cos(ry)
+            # Force a per-segment start heading (world yaw), overriding inherited/reorient. Used to
+            # make a SIT segment face the PERCEIVED furniture facing (turn-to-sit) -- the seam stays
+            # clean because the prefix pose is heading-canonicalized (RESULTS §11 reorient).
+            if seg_headings is not None and seg_headings[k] is not None:
+                h = float(seg_headings[k])
+                pose = pose.copy(); pose[2], pose[3] = np.sin(h), np.cos(h)
             ht = head_targets[k] if head_targets is not None else None
             feat = clip_model.encode_text(
                 clip_mod.tokenize([txt], truncate=True).to(DEV)).float()
@@ -140,7 +147,14 @@ def rollout(trans, net, clip_model, clip_mod, mean, std, ns, texts, goals,
             tok = trans.sample(cond, if_categorial=False)
             if tok.numel() == 0:
                 break
-            motion = net.forward_decoder(tok)[0].cpu().numpy() * std + mean
+            if scene_ctx is not None:
+                # Heightmap-conditioned (geometry-grounded) decode: resolve the circularity by
+                # placing a first-pass decode, sampling the scene heightmap along it, re-decoding.
+                from scene_decode import decode_with_heightmap  # lazy: only when scene-aware
+                motion = decode_with_heightmap(net, tok, pose, scene_ctx, mf, std, mean,
+                                               n_iters=decode_iters)
+            else:
+                motion = net.forward_decoder(tok)[0].cpu().numpy() * std + mean
             world = se2_place_full_body(motion.astype(np.float32), pose, mf)  # (T,22,3) Z-up
 
             local = mf.local_joint_positions(motion.astype(np.float32))
