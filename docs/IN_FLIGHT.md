@@ -3,7 +3,7 @@
 Volatile state that is NOT captured by RESULTS.md: what is running, where things live on the
 boxes, and the next concrete action. **Update or delete this file when its work lands.**
 
-Last updated: 2026-09-02. Steps 1-12 done. Best interaction model
+Last updated: 2026-09-02 (wall-aware routing + foot-contact deskating). Steps 1-13 done. Best interaction model
 `~/wander_data/step11/checkpoints/action` (`cond_mode=full_action`); best navigation model
 `~/wander_data/step10/checkpoints/goalaug` (`cond_mode=full`); finetuned VQ-VAE
 `~/wander_data/motion_data/track2_checkpoints/net_iter020000.pth`.
@@ -38,6 +38,32 @@ on the couch). Outputs in `~/wander_data/step12_mesh_demo/`; the couch-sit + off
 (scp via sshpass, key auth not set up). NOTE the sit still lands at the seat EDGE/corner, not squarely
 (the documented sit-placement narrowness), so interaction clips are watchable but not crisp; couches
 read better than armchairs.
+
+**WALL-AWARE ROUTING (2026-09-02) — DONE, fixes the demo walking through walls. RESULTS §16.**
+The demo's straight-line hops walked THROUGH any wall between start and furniture (§14 carried 3.0%
+collision; guided_seg can't detour a metre). `src/grid_planner.py` = A* on the inflated 0.9 m tall
+raster with ADAPTIVE clearance (0.28→0.12 m, largest that keeps start↔goal connected — a fixed 0.28 m
+disconnects cluttered scene0000). Wired into `demo_end2end.expand_plan`. Validated (272 routes, 4
+scenes): straight 4.1% (max 28%) → planned 0.03%; on wall-crossing routes 7.0%→0.05%
+(`scripts/planner/eval_path_planning.py`). End-to-end demo scene0151 (start 4.8 m across the room):
+**11.7 m at 0.0% collision, SAT+STOOD**, foot-deskated. Clip+figure `~/wander_data/step16_demo/`.
+NOTE the demo now EVICTS the 27B VLM (`qwen_plan.unload`) after planning — else the motion model OOMs
+(the 27B holds ~18 GB on the shared GPU). Reproduce demo: `demo_end2end.py --scene scene0151_00
+--instruction "...sit and relax on the couch..." --ckpt ~/wander_data/step11/checkpoints/action
+--vqvae-ckpt <ft-vqvae> --out <dir> --start 3.88,8.79`.
+
+**FOOT-CONTACT DESKATING (2026-09-02) — DONE, the "contact" axis with real headroom. RESULTS §15.**
+`scripts/contact/` measured (GT-oracle) where the model is NOT contact-correct. Sit contact-HEIGHT:
+small headroom (replicates §12 — nominal seats ~0.42 m dominate, model ~0.5 vs GT ~0.6; a single-point
+mesh seat sample is also noisy). Foot-SKATE: real and universal — the VQ-VAE round trip alone injects
+2.2× GT skate (56→125 mm/s), generation 2.5× (141). `src/foot_contact.deskate` (training-free,
+placement-stage: anchor planted feet, pull the lower leg, forward re-project from the fixed hip to
+preserve bone lengths EXACTLY; root/pelvis/upper body untouched) cuts gen skate **~139 → ~38 mm/s
+(73%, 3 seeds)** at zero cost — bone-drift 0.000, root/goal bit-identical, no new penetration. Wired
+into `rollout(..., deskate_feet=True)` as OUTPUT-ONLY (never feeds the chaining prefix, §7 rule 3).
+Standard motion cleanup, not a headline — it makes locomotion quality/the demo respectable and is the
+correct home for "contact" since contact-HEIGHT has no headroom here. Reproduce:
+`scripts/contact/{measure_foot_contact,eval_deskate}.py --n 40 --seed {0,1,2}`.
 
 **Two big investigations closed since (both documented, do not redo):**
 - **Geometry-grounded tokenizer (SceMoS port): explored → MARGINAL, not worth shipping. RESULTS §12.**

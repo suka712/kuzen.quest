@@ -61,6 +61,17 @@ def call_qwen(image_path, instruction, legend, timeout=300):
     return r.get("response", "").strip()
 
 
+def unload(model=MODEL, timeout=20):
+    """Evict the VLM from GPU memory (ollama keep_alive:0). The 27B holds ~18 GB; the motion model
+    that runs next OOMs (CUBLAS_STATUS_NOT_INITIALIZED) unless the planner frees the GPU first."""
+    try:
+        payload = json.dumps({"model": model, "keep_alive": 0}).encode()
+        req = urllib.request.Request(OLLAMA, data=payload, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=timeout).read()
+    except Exception:
+        pass
+
+
 def parse_plan(resp, anchors):
     """Parse the VLM JSON; resolve each target to a world (x,y). Returns list of resolved segments."""
     txt = resp

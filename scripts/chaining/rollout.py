@@ -101,7 +101,7 @@ def build_cond(cond_mode, goal_world, start_pose, prefix_pose, occ, extent, cmea
 def rollout(trans, net, clip_model, clip_mod, mean, std, ns, texts, goals,
             start_pose, prefix_pose, occ=None, extent=None, max_seg=None, actions=None,
             reorient=False, head_targets=None, scene_ctx=None, decode_iters=2,
-            seg_headings=None):
+            seg_headings=None, deskate_feet=False, deskate_floor=0.0):
     """Chain len(goals) segments. Returns list of per-segment dicts.
 
     actions: per-segment action name (walk/sit/stand up/lie), required when the model's
@@ -156,6 +156,14 @@ def rollout(trans, net, clip_model, clip_mod, mean, std, ns, texts, goals,
             else:
                 motion = net.forward_decoder(tok)[0].cpu().numpy() * std + mean
             world = se2_place_full_body(motion.astype(np.float32), pose, mf)  # (T,22,3) Z-up
+            if deskate_feet:
+                # OUTPUT-ONLY foot-contact cleanup (src/foot_contact): removes the ~2.5x-GT
+                # foot-skate the VQ-VAE injects (scripts/contact). Root/goal/bone-lengths are
+                # preserved exactly. Applied to the placed world pose ONLY -- NOT to `local`/the
+                # prefix handoff below, which must stay the on-manifold decoded pose (RESULTS §7
+                # rule 3), exactly like blend_seam is display-only.
+                from foot_contact import deskate
+                world = deskate(world, floor=deskate_floor)
 
             local = mf.local_joint_positions(motion.astype(np.float32))
             segs.append({

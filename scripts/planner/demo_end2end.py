@@ -30,6 +30,7 @@ from vqvae_loader import load_vqvae  # noqa: E402
 from rollout import load_model, build_cond, yaw_from_joints, HEAD_MIN_DISP  # noqa: E402
 from se2_utils import se2_place_full_body  # noqa: E402
 from demo_rollout import sample_waypoints  # noqa: E402
+from grid_planner import plan_path, build_levels  # noqa: E402
 from collision_guided import safe_sample, decode_place, path_collision  # noqa: E402
 from render_mesh_demo import render_in_mesh, stitch  # noqa: E402
 from qwen_plan import make_plan  # noqa: E402
@@ -42,14 +43,32 @@ MAX_HOP = 1.1        # per walk segment (RESULTS §9): longer goals undershoot
 FRONT = 0.35         # stop this far before an interaction target so the sit goal is in-distribution
 
 
-def expand_plan(plan, start_xy, occ, extent, rng):
-    """Plan segments -> flat per-rollout (texts, actions, goals). A 'walk' to a target is split into
+def expand_plan(plan, start_xy, occ, tall, extent, rng, levels=None):
+    """Plan segments -> flat per-rollout (texts, actions, goals). A 'walk' to a target is ROUTED
+    AROUND WALLS by the grid planner (src/grid_planner) and each collision-free leg is split into
     <=MAX_HOP hops that DELIVER the body; a walk that precedes a sit/lie on the same target stops
-    FRONT m short so the interaction goal is short (compose_goals_texts logic, plan-driven)."""
+    FRONT m short so the interaction goal is short (compose_goals_texts logic, plan-driven).
+
+    Before the planner the hops were a STRAIGHT line to the furniture, so a wall in between was
+    walked straight through (the demo's reported bug; guided_seg can't detour a metre, RESULTS §16)."""
+    if levels is None:
+        levels = build_levels(tall, extent)
     texts, actions, goals, kinds = [], [], [], []
     cur = np.asarray(start_xy, float)
     approach_u = np.array([1.0, 0.0])
     n = len(plan)
+
+    def add_walk_to(dest):
+        # route around walls, then split each collision-free leg into <=MAX_HOP hops
+        prev = cur.copy()
+        for wp in plan_path(prev, np.asarray(dest, float), tall, extent, levels=levels):
+            span = np.linalg.norm(wp - prev)
+            nh = max(1, int(np.ceil(span / MAX_HOP)))
+            for k in range(nh):
+                goals.append(prev + (wp - prev) * ((k + 1) / nh))
+                texts.append("walk to the target"); actions.append("walk"); kinds.append("walk")
+            prev = wp
+
     for i, seg in enumerate(plan):
         act = seg["action"]
         if act == "walk":
@@ -63,12 +82,8 @@ def expand_plan(plan, start_xy, occ, extent, rng):
                 if i + 1 < n and plan[i + 1]["action"] in ("sit", "lie") \
                         and plan[i + 1].get("target") == seg["target"]:
                     dest = dest + FRONT * approach_u          # stop just in front of the furniture
-            span = np.linalg.norm(dest - cur)
-            nh = max(1, int(np.ceil(span / MAX_HOP)))
-            for k in range(nh):
-                goals.append(cur + (dest - cur) * ((k + 1) / nh))
-                texts.append("walk to the target"); actions.append("walk"); kinds.append("walk")
-            cur = dest
+            add_walk_to(dest)
+            cur = np.asarray(dest, float)
         elif act in ("sit", "lie"):
             dest = np.asarray(seg["xy"], float)
             texts.append("sit on the couch" if act == "sit" else "lie on the bed")
@@ -115,6 +130,8 @@ def guided_rollout(trans, net, cmodel, mean, std, ns, texts, actions, goals, sta
             if best is None:
                 break
             _, world, local, ge, cl = best
+            from foot_contact import deskate       # OUTPUT-ONLY foot-skate cleanup (RESULTS §15)
+            world = deskate(world, floor=0.0)       # se2_place emits clip-floor (feet ~0)
             segs.append({"world": world, "action": act, "goal_err": ge, "coll": cl})
             end_xy = world[-1, 0, :2]; end_yaw = yaw_from_joints(world[-1])
             pose = np.array([end_xy[0], end_xy[1], np.sin(end_yaw), np.cos(end_yaw)], np.float32)
@@ -187,6 +204,18 @@ def main():
     if not plan:
         print("empty plan; aborting"); return
 
+    # free the GPU: the 27B VLM holds ~18 GB and the motion model OOMs unless it is evicted first
+    from qwen_plan import unload as unload_vlm
+    unload_vlm()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    import time
+    for _ in range(20):                     # wait for ollama to release VRAM before allocating
+        free = torch.cuda.mem_get_info()[0] / 1e9 if torch.cuda.is_available() else 99
+        if free > 6:
+            break
+        time.sleep(1)
+
     # --- MOTION ---
     net = load_vqvae(ckpt_path=args.vqvae_ckpt, device=DEV); net.eval()
     mean = np.load(f"{T2M}/checkpoints/t2m/VQVAEV3_CB1024_CMT_H1024_NRES3/meta/mean.npy").astype(np.float32)
@@ -194,7 +223,7 @@ def main():
     cmodel, _ = clip.load("ViT-B/32", device=DEV, jit=False); cmodel.eval()
     trans, ns = load_model(args.ckpt)
 
-    texts, actions, goals, kinds = expand_plan(plan, start_xy, occ, extent, rng)
+    texts, actions, goals, kinds = expand_plan(plan, start_xy, occ, tall, extent, rng)
     d = np.asarray(goals[0]) - start_xy; yaw = float(np.arctan2(d[1], d[0]))
     start_pose = np.array([start_xy[0], start_xy[1], np.sin(yaw), np.cos(yaw)], np.float32)
     prefix = standing_prefix()

@@ -4,7 +4,7 @@ Authoritative project document. Read fully every session before acting. This is 
 ground truth for goals, architecture, what is validated, and where the project is likely
 to fail. Step specs are separate and disposable; this file is not.
 
-**Status 2026-08-18.** Steps 1-11 done. All three original research bets passed — goal
+**Status 2026-09-02.** Steps 1-13 done (+ foot-contact deskating, §15). All three original research bets passed — goal
 grounding, conditional continuation, and chaining. **Step 11 (interaction in a chain) is DONE:
 done-criteria 4 and 5 MET** — watchable walk→sit→stand→walk clips in real ScanNet rooms
 (`~/wander_data/step11_demo_multiseg/`). It was NOT free engineering: interaction was blocked
@@ -14,11 +14,18 @@ is OOD in HUMANISE), fixed by an explicit action one-hot + a synthesized walk→
 `~/wander_data/step11/checkpoints/action`.
 
 **Step 12 (collision-guided decoding) is DONE (2026-09-02, RESULTS §13)** — the last SWAPPABLE
-contribution. Inference-time steering (`collision_guided.py`, no training): greedy chains collide
-≥ a straight line (the model doesn't steer), but per-segment best-of-N on `goal_err + 10·collision`
-(`guided_seg`) drops collision below the straight-line oracle on both seeds while improving goal
-error. **Next: step 13 (Qwen JSON → end-to-end ScanNet demo) and/or the paper writeup.** No number
-here is comparable to published work yet (generation FID still unreproduced).
+research contribution. Inference-time steering (`collision_guided.py`, no training): greedy chains
+collide ≥ a straight line (the model doesn't steer), but per-segment best-of-N on `goal_err +
+10·collision` (`guided_seg`) drops collision below the straight-line oracle on both seeds while
+improving goal error. **Step 13 (Qwen JSON → end-to-end ScanNet demo) is also DONE (RESULTS §14).**
+And **foot-contact deskating is DONE (RESULTS §15)** — the "contact" axis with real headroom is
+foot-SKATE (the VQ-VAE injects 2.5× GT), not contact-HEIGHT (no headroom on HUMANISE, §12/§15);
+`src/foot_contact.deskate` cuts gen skate ~139→~38 mm/s at zero goal/quality cost. **Wall-aware
+routing is DONE (RESULTS §16)** — the demo used to walk THROUGH walls (straight-line hops); a global
+A* planner on the inflated 0.9 m tall raster (`src/grid_planner.py`, adaptive clearance) now routes
+walks around walls: end-to-end demo dropped from 3–24% path collision to **0.0%**, still SAT+STOOD.
+**Next: step 14 (benchmark comparison + generation FID) and the paper writeup.** No number here is
+comparable to published work yet (generation FID still unreproduced).
 
 *(This header goes stale faster than anything else in the file. Three stale "next step"
 pointers were found in one day. If it disagrees with `docs/IN_FLIGHT.md`, IN_FLIGHT wins —
@@ -246,8 +253,17 @@ SWAPPABLE (change freely if evidence says so — surface it, don't agonize):
   inference loop and reuses the raster that collision-guided decoding already needs. The RGB
   render stays available for figures, not for conditioning.
 - Collision-guided decoding (see 2e) and its fallbacks.
+- **Global path planning** (`src/grid_planner.py`, RESULTS §16). Inference-time A* on the inflated
+  0.9 m tall raster with adaptive clearance, producing collision-free waypoints so the demo routes
+  walks AROUND walls instead of through them (guided_seg only handles local drift, not metre-scale
+  detours). Wired into `demo_end2end.expand_plan`.
 - MLLM choice (Qwen3-VL 8B) — swappable if planning quality is poor.
 - Seam-blend details.
+- **Foot-contact deskating** (`src/foot_contact.deskate`, RESULTS §15). Output-only placement-stage
+  cleanup: anchors planted feet and re-projects the lower leg from the fixed hip (bone-length- and
+  root-preserving), cutting the VQ-VAE-injected foot-skate ~139→~38 mm/s at zero goal/quality cost.
+  Standard motion post-process, not a research claim — the productive home for "contact" given
+  contact-HEIGHT has no headroom here (RESULTS §12/§15). `rollout(..., deskate_feet=True)`.
 
 NOT excluded by default: earlier drafts listed RRT*, retrieval DB, and heightmap as
 "excluded." That was leftover cruft from a diluted context, not a real decision. Nothing

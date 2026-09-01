@@ -738,6 +738,96 @@ are untested at scale. (4) `qwen3.5:27b` is what is installed; CLAUDE.md specced
 one env var (`WANDER_PLANNER_MODEL`). But the pipeline is REAL and end-to-end: language in, interacting
 motion in a real room out, no hand-authored plan.
 
+## 15 · Foot-contact deskating — DONE. The productive "contact" axis (skate, not sit-height)
+
+Motivated by asking where the model's motion is actually NOT contact-correct. Two measurements
+(`scripts/contact/`, base scene-blind VQ-VAE + step-11 model, GT oracle throughout):
+
+**Sit contact-HEIGHT: small headroom (independent replication of §12).** `measure_contact_headroom.py`,
+40 sit clips: when a sit fires, the model's seated pelvis (~0.5 m) and GT's (~0.6 m) are within ~0.1 m
+on the NOMINAL seats (~0.42 m) that dominate HUMANISE. The GT oracle also exposed that a single-point
+mesh seat sample is NOISY (negative "seat" heights, GT contact-err 0.09 not ~0), so a placement
+projection built on it would be unreliable. Non-nominal (tall/low) seats — where the ~constant seated
+height would gap badly — barely occur AND rarely fire. So contact-height is not worth a corrector,
+exactly as §12 concluded from the tokenizer side.
+
+**Foot-skate: real, universal headroom.** `measure_foot_contact.py`, 40 walk clips, CLIP-FLOOR frame
+(feet rest at ~0, so foot height IS height above the floor — no mesh sampling). Three sources isolate
+the cause:
+
+| source | foot-skate (mm/s) | pen_max (mm) |
+|---|---|---|
+| GT (mocap) | 56 | ~0 |
+| VQ-VAE recon (encode→decode, no transformer) | 125 (**2.2× GT**) | ~0 |
+| production gen (step-11 model) | 141 (**2.5× GT**) | ~0 |
+
+So the TOKENIZER round trip alone more than doubles foot-skate (token discretization slides planted
+feet); generation adds a little. Penetration/float are already ~0. **The contact defect on this
+pipeline is a planted foot SLIDING, not contact height.**
+
+**The cleanup (`src/foot_contact.deskate`, training-free, placement-stage).** For each planted run of
+a foot (height <5 cm AND horizontal speed <2 cm/frame), anchor its horizontal position to the run
+median and pull the lower leg toward it (foot+ankle fully, knee half), ramped at run edges; then a
+forward re-projection from the FIXED hip restores every bone to its exact per-frame length. Root,
+pelvis and upper body are never touched. Result (`eval_deskate.py`, 3 seeds, 40 clips each):
+
+| source | skate mm/s (before→after) | bone-drift | root-shift |
+|---|---|---|---|
+| GT (oracle) | 56/53/51 → 25/26/23 | 0.000 | 0.000 |
+| recon | 125/122/123 → 35/32/30 | 0.000 | 0.000 |
+| gen | 141/136/142 → **38/39/38** | 0.000 | 0.000 |
+
+**gen foot-skate ~139 → ~38 mm/s (73% cut), stable across 3 seeds, at ZERO cost:** bone lengths
+preserved exactly (length-preserving re-projection), the root/pelvis path — and therefore goal error
+(§4) and every seam (§7) — bit-identical, no new penetration. Wired into `rollout(..., deskate_feet=
+True)` as an OUTPUT-ONLY step (like `blend_seam`): it never feeds the chaining prefix, which must stay
+the on-manifold decoded pose (§7 rule 3). Honest framing: this is a standard motion-cleanup post-
+process, not a headline contribution — it makes the reported locomotion quality and the demo respectable
+(cleaned feet are as planted as raw mocap), and it is the correct home for "contact" given §12/§15
+showed contact-HEIGHT has no headroom on HUMANISE. Deskating GT also drops 56→~25, i.e. the metric's
+gate counts a few mm of real mocap micro-slide; the load-bearing number is the 139→38 gen reduction.
+
+## 16 · Wall-aware routing — DONE. The demo no longer walks through walls
+
+The reported demo defect: the body walks straight THROUGH a wall. Root cause (`demo_end2end.expand_plan`):
+a walk to furniture was a STRAIGHT LINE from the current pose to the target, split into ≤1.1 m hops.
+If a wall sits between them, every hop aims across the wall and the model walks into it — decode-time
+steering (guided_seg, §13) can only nudge within the model's own generative variance, it cannot invent
+a metre-scale detour. §14's own demo carried 3.0% path collision from exactly this.
+
+**Fix: a global path planner (`src/grid_planner.py`, A* on the inflated 0.9 m tall raster).** Obstacles
+= the same tall (wall) raster collision is scored on (§8), DILATED by a body radius so the ROOT path
+keeps clearance; A* (8-connected, no diagonal corner-cutting) finds a collision-free cell path;
+line-of-sight shortcutting turns the staircase into a few natural legs; each leg is then split into
+≤1.1 m hops. `expand_plan` routes every walk through it; guided_seg still cleans up local drift.
+
+**Adaptive clearance (the one non-obvious bit).** A fixed 0.28 m inflation DISCONNECTS a cluttered
+room (scene0000: free space fragments into 6 components at 0.28 m, so start and goal land in different
+ones and A* fails → straight-line fallback → collision unchanged). `plan_path` tries clearance levels
+0.28→0.22→0.17→0.12 m and uses the LARGEST whose free space connects start and goal (connected-
+component check), so it keeps max wall clearance where the room allows and still finds a path in tight
+rooms.
+
+**Validation (`scripts/planner/eval_path_planning.py`, oracle-style: planned collision must be ~0).**
+272 start→furniture routes over 4 scenes:
+
+| | mean coll | max | routes crossing a wall (>1%) |
+|---|---|---|---|
+| straight (old demo) | 4.1% | 28.1% | 161 / 272 |
+| planned (A* detour) | **0.03%** | 1.37% | — |
+
+On the 161 wall-crossing routes specifically: **7.0% → 0.05%**. End-to-end demo (scene0151, start 4.8 m
+across the room, the couch instruction): the straight route was 23% through the couch-back/wall; the
+planned run walks **11.7 m at 0.0% collision** and still SAT (0.60 m) + STOOD (0.93 m). Foot-skate
+cleanup (§15) is also applied to the demo output. Figure `path_planning_fig.png`, clip
+`end2end_scene0151_00_0.mp4` under `~/wander_data/step16_demo/`.
+
+**Two honest notes.** (1) Collision is the ROOT path vs the wall footprint; a swinging limb can still
+graze in 3D — the body-radius inflation (adaptive, ≥0.12 m) is what buffers that, not a per-limb check.
+(2) The demo runs the VLM (ollama 27B, ~18 GB VRAM) and the motion model on one GPU; the planner script
+now EVICTS the VLM (`qwen_plan.unload`, keep_alive:0) after planning or the motion model OOMs
+(CUBLAS_STATUS_NOT_INITIALIZED).
+
 ## Conditioning inputs — evidence status
 
 | input | status |
