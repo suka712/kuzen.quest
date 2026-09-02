@@ -39,6 +39,16 @@ on the couch). Outputs in `~/wander_data/step12_mesh_demo/`; the couch-sit + off
 (the documented sit-placement narrowness), so interaction clips are watchable but not crisp; couches
 read better than armchairs.
 
+**FURNITURE-AWARE ROUTING (2026-09-02) — DONE, fixes the demo walking through CHAIRS. RESULTS §17.**
+§16's wall-planner still walked through furniture: collision (metric AND planner) uses the 0.9 m tall
+raster, which DROPS low furniture (chairs/sofas). `grid_planner.furniture_obstacle` plans against walls
++ all low furniture (occ & ~tall) MINUS the target piece (freed by removing its connected low
+component — no instance seg needed), so the body routes around every other chair but still sits on its
+goal. Wired into `expand_plan` + a furniture-collision readout in the demo. Validated (204 routes):
+furniture-collision straight 13.4% / walls-only-plan ~5% / furniture-aware **0.02%**. Demo scene0151:
+furniture-collision ~5%→**0.0%**, still SAT+STOOD. `~/wander_data/step17_demo/`, shipped to
+mcx:.../step17/.
+
 **WALL-AWARE ROUTING (2026-09-02) — DONE, fixes the demo walking through walls. RESULTS §16.**
 The demo's straight-line hops walked THROUGH any wall between start and furniture (§14 carried 3.0%
 collision; guided_seg can't detour a metre). `src/grid_planner.py` = A* on the inflated 0.9 m tall

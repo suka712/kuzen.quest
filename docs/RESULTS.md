@@ -828,6 +828,40 @@ graze in 3D — the body-radius inflation (adaptive, ≥0.12 m) is what buffers 
 now EVICTS the VLM (`qwen_plan.unload`, keep_alive:0) after planning or the motion model OOMs
 (CUBLAS_STATUS_NOT_INITIALIZED).
 
+## 17 · Furniture-aware routing — DONE. The demo no longer walks through chairs
+
+After §16 the demo still walked THROUGH a chair. Root cause: collision — the metric AND the planner's
+obstacle map — is the 0.9 m TALL raster, which DROPS low furniture by design (so sitting on furniture
+isn't scored as collision, and so anchors can be detected, §8). So the §16 wall-planner genuinely
+avoids walls but sees a chair/sofa/table as empty floor and routes straight through it. §16's "0.0%
+collision" was 0.0% *against walls*; furniture was never in the map.
+
+**Fix (`grid_planner.furniture_obstacle`).** Plan against **walls + all low furniture (occ & ~tall),
+MINUS the piece the current segment targets.** The target is freed by removing its connected LOW
+component from the obstacle map — no instance segmentation (the blocked target-EXCLUSION idea from
+IN_FLIGHT needed to exclude ONE instance from a wall-merged raster; here we only need to FREE the
+target's own low-furniture blob, which the `low = occ & ~tall` components give directly). So the body
+routes around every other chair/table but still approaches and sits on its goal couch. `expand_plan`
+builds this per walk-target; `away` walks avoid all furniture.
+
+**Validation (`eval_path_planning.py`, scored against the FURNITURE map = walls + non-target
+furniture — what "through the chair" actually means).** 204 start→furniture routes / 4 scenes:
+
+| routing | furniture-collision |
+|---|---|
+| straight line | 13.4% (max 61%) |
+| walls-only plan (§16, what shipped) | ~5% avg — **still clips furniture** |
+| **furniture-aware plan** | **0.02%** (max 1.2%) |
+
+On the 157 routes that hit furniture: straight 17.4% → furniture-aware 0.02%. End-to-end demo (scene0151,
+same start): **wall-collision 0.0% AND furniture-collision 0.0%** (was ~5%), path 13.9 m (longer — it
+detours around the furniture), still SAT (0.60 m) + STOOD (0.93 m). Clip+figure `~/wander_data/step17_demo/`.
+
+**Honest scope.** Still the ROOT path vs a footprint (a swung limb can graze; the ≥0.12 m adaptive
+inflation buffers it). The connected-component target-free assumes the goal furniture is its own low
+blob — if a chair is fused to the target sofa in the raster they free together; not observed in the
+demo scenes but a known failure mode. Sit still lands at the seat edge (§11), unchanged.
+
 ## Conditioning inputs — evidence status
 
 | input | status |

@@ -28,6 +28,30 @@ def _disk(radius_cells):
     return (x * x + y * y) <= radius_cells * radius_cells
 
 
+def furniture_obstacle(tall, occ, extent, target_xy=None):
+    """Obstacle map for planning that AVOIDS FURNITURE, not just walls. The 0.9 m tall raster drops
+    low furniture (a chair/sofa/table is FREE there) so a wall-only plan walks straight through a
+    chair. Here obstacle = walls (tall) UNION all low furniture (occ & ~tall), MINUS the one piece
+    the current segment targets -- so the body routes around every chair/table it is only passing but
+    can still approach and sit on its goal furniture. target_xy is freed by removing the connected
+    LOW-furniture component under it (RESULTS §17), which needs no instance segmentation."""
+    tall_b = np.asarray(tall, bool); occ_b = np.asarray(occ, bool)
+    low = occ_b & ~tall_b
+    obstacle = tall_b | low
+    if target_xy is not None:
+        lbl, _ = ndimage.label(low)
+        ys, xs = np.nonzero(low)
+        for t in np.atleast_2d(np.asarray(target_xy, float)):   # one point or a list of points
+            rc = world_to_px(t, extent, tall_b.shape)
+            tl = lbl[rc]
+            if tl == 0 and len(ys):                  # target centre not on a low cell -> nearest one
+                k = np.argmin((ys - rc[0]) ** 2 + (xs - rc[1]) ** 2)
+                tl = lbl[ys[k], xs[k]]
+            if tl != 0:
+                obstacle = obstacle & ~(lbl == tl)   # free this target furniture (approach + sit)
+    return obstacle
+
+
 def free_space(tall, extent, inflate_m=BODY_RADIUS_M):
     """Boolean walkable map = NOT (tall dilated by inflate_m). Cells within inflate_m of a wall are
     blocked so the root path (and thus the body) keeps clearance."""

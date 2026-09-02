@@ -20,10 +20,11 @@ collide ≥ a straight line (the model doesn't steer), but per-segment best-of-N
 improving goal error. **Step 13 (Qwen JSON → end-to-end ScanNet demo) is also DONE (RESULTS §14).**
 And **foot-contact deskating is DONE (RESULTS §15)** — the "contact" axis with real headroom is
 foot-SKATE (the VQ-VAE injects 2.5× GT), not contact-HEIGHT (no headroom on HUMANISE, §12/§15);
-`src/foot_contact.deskate` cuts gen skate ~139→~38 mm/s at zero goal/quality cost. **Wall-aware
-routing is DONE (RESULTS §16)** — the demo used to walk THROUGH walls (straight-line hops); a global
-A* planner on the inflated 0.9 m tall raster (`src/grid_planner.py`, adaptive clearance) now routes
-walks around walls: end-to-end demo dropped from 3–24% path collision to **0.0%**, still SAT+STOOD.
+`src/foot_contact.deskate` cuts gen skate ~139→~38 mm/s at zero goal/quality cost. **Wall- and furniture-aware
+routing is DONE (RESULTS §16–17)** — the demo used to walk THROUGH walls (straight-line hops) and then
+through CHAIRS (the 0.9 m tall raster drops low furniture); a global A* planner (`src/grid_planner.py`,
+adaptive clearance) on **walls + furniture minus the target piece** now routes walks around both:
+end-to-end demo wall-collision 3–24%→**0.0%** and furniture-collision ~5%→**0.0%**, still SAT+STOOD.
 **Next: step 14 (benchmark comparison + generation FID) and the paper writeup.** No number here is
 comparable to published work yet (generation FID still unreproduced).
 
@@ -253,10 +254,10 @@ SWAPPABLE (change freely if evidence says so — surface it, don't agonize):
   inference loop and reuses the raster that collision-guided decoding already needs. The RGB
   render stays available for figures, not for conditioning.
 - Collision-guided decoding (see 2e) and its fallbacks.
-- **Global path planning** (`src/grid_planner.py`, RESULTS §16). Inference-time A* on the inflated
-  0.9 m tall raster with adaptive clearance, producing collision-free waypoints so the demo routes
-  walks AROUND walls instead of through them (guided_seg only handles local drift, not metre-scale
-  detours). Wired into `demo_end2end.expand_plan`.
+- **Global path planning** (`src/grid_planner.py`, RESULTS §16–17). Inference-time A* with adaptive
+  clearance on **walls + low furniture minus the target piece** (`furniture_obstacle`), producing
+  collision-free waypoints so the demo routes walks AROUND walls AND chairs instead of through them
+  (guided_seg only handles local drift, not metre-scale detours). Wired into `demo_end2end.expand_plan`.
 - MLLM choice (Qwen3-VL 8B) — swappable if planning quality is poor.
 - Seam-blend details.
 - **Foot-contact deskating** (`src/foot_contact.deskate`, RESULTS §15). Output-only placement-stage

@@ -30,7 +30,7 @@ from vqvae_loader import load_vqvae  # noqa: E402
 from rollout import load_model, build_cond, yaw_from_joints, HEAD_MIN_DISP  # noqa: E402
 from se2_utils import se2_place_full_body  # noqa: E402
 from demo_rollout import sample_waypoints  # noqa: E402
-from grid_planner import plan_path, build_levels  # noqa: E402
+from grid_planner import plan_path, build_levels, furniture_obstacle  # noqa: E402
 from collision_guided import safe_sample, decode_place, path_collision  # noqa: E402
 from render_mesh_demo import render_in_mesh, stitch  # noqa: E402
 from qwen_plan import make_plan  # noqa: E402
@@ -43,25 +43,28 @@ MAX_HOP = 1.1        # per walk segment (RESULTS §9): longer goals undershoot
 FRONT = 0.35         # stop this far before an interaction target so the sit goal is in-distribution
 
 
-def expand_plan(plan, start_xy, occ, tall, extent, rng, levels=None):
+def expand_plan(plan, start_xy, occ, tall, extent, rng):
     """Plan segments -> flat per-rollout (texts, actions, goals). A 'walk' to a target is ROUTED
-    AROUND WALLS by the grid planner (src/grid_planner) and each collision-free leg is split into
-    <=MAX_HOP hops that DELIVER the body; a walk that precedes a sit/lie on the same target stops
-    FRONT m short so the interaction goal is short (compose_goals_texts logic, plan-driven).
+    AROUND WALLS AND FURNITURE by the grid planner (src/grid_planner) and each collision-free leg is
+    split into <=MAX_HOP hops that DELIVER the body; a walk that precedes a sit/lie on the same target
+    stops FRONT m short so the interaction goal is short (compose_goals_texts logic, plan-driven).
 
-    Before the planner the hops were a STRAIGHT line to the furniture, so a wall in between was
-    walked straight through (the demo's reported bug; guided_seg can't detour a metre, RESULTS §16)."""
-    if levels is None:
-        levels = build_levels(tall, extent)
+    Two obstacle refinements, both to stop the body passing through geometry:
+    - vs WALLS (RESULTS §16): straight-line hops walked through a wall in between; A* routes around.
+    - vs FURNITURE (RESULTS §17): the 0.9 m tall map drops low furniture, so a walls-only plan walked
+      through CHAIRS. The obstacle is now walls + all low furniture MINUS the piece being targeted, so
+      the body routes around every other chair/table but can still approach and sit on its goal."""
     texts, actions, goals, kinds = [], [], [], []
     cur = np.asarray(start_xy, float)
     approach_u = np.array([1.0, 0.0])
     n = len(plan)
 
-    def add_walk_to(dest):
-        # route around walls, then split each collision-free leg into <=MAX_HOP hops
+    def add_walk_to(dest, target_xy):
+        # obstacle = walls + furniture, freeing only the target piece; route around it, then hop-split
+        obst = furniture_obstacle(tall, occ, extent, target_xy=target_xy)
+        levels = build_levels(obst, extent)
         prev = cur.copy()
-        for wp in plan_path(prev, np.asarray(dest, float), tall, extent, levels=levels):
+        for wp in plan_path(prev, np.asarray(dest, float), obst, extent, levels=levels):
             span = np.linalg.norm(wp - prev)
             nh = max(1, int(np.ceil(span / MAX_HOP)))
             for k in range(nh):
@@ -75,14 +78,16 @@ def expand_plan(plan, start_xy, occ, tall, extent, rng, levels=None):
             if seg["target"] == "away":
                 wp = sample_waypoints(occ, extent, cur, 1, min_step=1.0, rng=rng, max_step=1.9)
                 dest = np.asarray(wp[0], float) if wp else cur + approach_u * 1.4
+                target_xy = None                             # avoid ALL furniture when leaving
             else:
                 dest = np.asarray(seg["xy"], float)
+                target_xy = dest.copy()                      # carve the furniture we're heading to
                 d = cur - dest; nrm = np.linalg.norm(d)
                 approach_u = d / (nrm if nrm > 1e-6 else 1e-6)
                 if i + 1 < n and plan[i + 1]["action"] in ("sit", "lie") \
                         and plan[i + 1].get("target") == seg["target"]:
                     dest = dest + FRONT * approach_u          # stop just in front of the furniture
-            add_walk_to(dest)
+            add_walk_to(dest, target_xy)
             cur = np.asarray(dest, float)
         elif act in ("sit", "lie"):
             dest = np.asarray(seg["xy"], float)
@@ -238,8 +243,15 @@ def main():
     if not segs:
         print("no motion generated"); return
     path = np.concatenate([s["world"][:, 0, :2] for s in segs])
+    # furniture collision = path on walls + NON-interacted furniture (carve the sit/lie targets, since
+    # the body legitimately ends up ON them). This is the metric that sees "walked through the chair".
+    inter_xys = [np.asarray(s["xy"], float) for s in plan
+                 if s["action"] in ("sit", "lie", "stand up") and s.get("target") != "away"]
+    furn = furniture_obstacle(tall, occ, extent,
+                              target_xy=(inter_xys if inter_xys else None)).astype(np.float32)
     print(f"path {float(np.sum(np.linalg.norm(np.diff(path,axis=0),axis=1))):.1f} m  "
-          f"collision {path_collision(path, tall, extent)*100:.1f}%")
+          f"wall-collision {path_collision(path, tall, extent)*100:.1f}%  "
+          f"furniture-collision {path_collision(path, furn, extent)*100:.1f}%")
     # risk #4: goal error is z-blind, so verify interactions by PELVIS HEIGHT, not goal error
     from humanise_join import J_PELVIS
     for i, (k, s) in enumerate(zip(kinds, segs)):

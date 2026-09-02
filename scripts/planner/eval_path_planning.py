@@ -22,7 +22,7 @@ for p in ["src", "scripts/track1", "scripts/chaining", "scripts/planner"]:
 
 from scene_anchors import load_scene_maps, detect_anchors  # noqa: E402
 from collision_guided import straight_line_collision  # noqa: E402
-from grid_planner import plan_path, build_levels  # noqa: E402
+from grid_planner import plan_path, build_levels, furniture_obstacle  # noqa: E402
 from demo_rollout import sample_waypoints  # noqa: E402
 
 
@@ -45,7 +45,7 @@ def main():
         anchors = detect_anchors(occ.astype(bool), tall.astype(bool), extent)
         if not anchors:
             print(f"{sc}: no anchors"); continue
-        levels = build_levels(tall, extent)  # adaptive clearance, reused across all routes
+        walls_levels = build_levels(tall, extent)   # walls-only planner (the previous fix)
         # sample free starts far from furniture (real walk-ups)
         starts = []
         for _ in range(args.starts * 6):
@@ -55,32 +55,33 @@ def main():
                 starts.append(np.asarray(wp[0], float))
             if len(starts) >= args.starts:
                 break
-        s_str, s_pln, s_wall = [], [], 0
+        s_str, s_wallp, s_furn = [], [], []
         for st in starts:
             for a in anchors:
                 goal = a["xy"].astype(float)
-                cs = straight_line_collision(st, [goal], tall, extent) * 100
-                wps = plan_path(st, goal, tall, extent, levels=levels)
-                cp = straight_line_collision(st, wps, tall, extent) * 100
-                s_str.append(cs); s_pln.append(cp); n_pairs += 1
-                if cs > 1.0:
-                    s_wall += 1; n_wall += 1
-        tot_str += s_str; tot_pln += s_pln
-        print(f"{sc}: {len(starts)} starts x {len(anchors)} anchors = {len(s_str)} routes | "
-              f"straight coll mean {np.mean(s_str):.1f}% (max {np.max(s_str):.1f}%), "
-              f"{s_wall} cross a wall (>1%) | planned coll mean {np.mean(s_pln):.2f}% "
-              f"(max {np.max(s_pln):.2f}%)")
+                # score every routing against the FURNITURE map (walls + non-target furniture):
+                # this is what "walks through the chair" actually means.
+                furn = furniture_obstacle(tall, occ, extent, target_xy=goal).astype(np.float32)
+                furn_levels = build_levels(furn, extent)
+                cs = straight_line_collision(st, [goal], furn, extent) * 100         # straight line
+                wl = straight_line_collision(st, plan_path(st, goal, tall, extent, levels=walls_levels),
+                                             furn, extent) * 100                       # walls-only plan
+                fp = straight_line_collision(st, plan_path(st, goal, furn, extent, levels=furn_levels),
+                                             furn, extent) * 100                       # furniture-aware plan
+                s_str.append(cs); s_wallp.append(wl); s_furn.append(fp); n_pairs += 1
+        tot_str += s_str; tot_pln += s_furn
+        print(f"{sc}: {len(s_str)} routes | furniture-collision: straight {np.mean(s_str):.1f}% | "
+              f"walls-only plan {np.mean(s_wallp):.1f}% | furniture-aware plan {np.mean(s_furn):.2f}%")
 
     if n_pairs:
         ts, tp = np.array(tot_str), np.array(tot_pln)
-        print(f"\n=== ALL {n_pairs} routes ===")
-        print(f"straight (current demo): mean {ts.mean():.1f}%  max {ts.max():.1f}%  "
-              f"| {n_wall} routes cross a wall (>1%)")
-        print(f"planned  (A* detour)   : mean {tp.mean():.2f}%  max {tp.max():.2f}%")
-        wall = ts > 1.0
-        if wall.any():
-            print(f"on the {wall.sum()} WALL-CROSSING routes: straight {ts[wall].mean():.1f}% "
-                  f"-> planned {tp[wall].mean():.2f}%  (this is the demo bug, fixed)")
+        print(f"\n=== ALL {n_pairs} routes, FURNITURE-collision (walls + non-target furniture) ===")
+        print(f"straight line          : mean {ts.mean():.1f}%  max {ts.max():.1f}%")
+        print(f"furniture-aware planner: mean {tp.mean():.2f}%  max {tp.max():.2f}%")
+        hit = ts > 1.0
+        if hit.any():
+            print(f"on the {hit.sum()} routes that hit furniture: straight {ts[hit].mean():.1f}% "
+                  f"-> planned {tp[hit].mean():.2f}%  (the chair-hit, fixed)")
 
 
 if __name__ == "__main__":
